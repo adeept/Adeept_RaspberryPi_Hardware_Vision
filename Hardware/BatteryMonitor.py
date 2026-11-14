@@ -8,7 +8,7 @@ Battery voltage and level monitor based on ADS7830 ADC.
 Reuses the common ads7830 driver, supports shared ADC hardware.
 """
 import time
-from ads7830 import ADS7830
+from .ads7830 import ADS7830
 
 
 class BatteryMonitor:

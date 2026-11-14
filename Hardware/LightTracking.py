@@ -7,7 +7,7 @@ Single-channel light tracking module based on ADS7830 ADC.
 Reads brightness value from channel A1 by default.
 """
 import time
-from ads7830 import ADS7830
+from .ads7830 import ADS7830
 
 
 class LightTracking:
