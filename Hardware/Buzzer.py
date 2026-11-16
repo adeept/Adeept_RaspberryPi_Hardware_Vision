@@ -2,8 +2,12 @@
 # File name   : Buzzer.py
 # Website     : www.Adeept.com
 # Author      : Adeept
+import logging
+
 from gpiozero import TonalBuzzer
 from time import sleep
+
+logger = logging.getLogger(__name__)
 
 
 class Buzzer:
@@ -29,14 +33,17 @@ class Buzzer:
 
     def play(self, tune):
         """
-        Play a custom musical tune
+        Play a custom musical tune (blocking) and always silence the buzzer at the end,
+        even when the caller is interrupted with Ctrl+C.
         :param tune: List of [note, duration] pairs
         """
-        for note, duration in tune:
-            print(note)
-            self._buzzer.play(note)
-            sleep(float(duration))
-        self.stop()
+        try:
+            for note, duration in tune:
+                logger.debug("%s", note)
+                self._buzzer.play(note)
+                sleep(float(duration))
+        finally:
+            self.stop()
 
     def stop(self):
         """Stop buzzer output immediately"""

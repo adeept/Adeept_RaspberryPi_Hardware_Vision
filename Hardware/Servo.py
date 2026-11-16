@@ -19,12 +19,18 @@ class Servo:
     """
 
     def __init__(self, pca_device, channel, min_pulse=500, max_pulse=2400, actuation_range=180):
+        if actuation_range <= 0:
+            raise ValueError("actuation_range must be greater than zero")
+
         self._pca = pca_device
         self._channel = channel
         self._min_pulse = min_pulse
         self._max_pulse = max_pulse
         self._angle_range = actuation_range
         self._current_angle = 90.0
+
+        self._period_us = 1_000_000.0 / float(pca_device.frequency)
+        pca_device.claim_channel(channel, self)
 
     @property
     def angle(self):
@@ -38,14 +44,18 @@ class Servo:
         self._current_angle = value
         # Convert angle to pulse width (microseconds)
         pulse = self._min_pulse + (self._max_pulse - self._min_pulse) * value / self._angle_range
-        # Convert pulse width to PCA9685 tick count (50 Hz = 20000 µs period)
-        off_count = int(pulse / 20000 * PCA9685._RESOLUTION)
+        # Convert pulse width to PCA9685 tick count using the real PWM period
+        off_count = int(round(pulse / self._period_us * self._pca.resolution))
         self._pca.set_pwm(self._channel, 0, off_count)
 
     def close(self):
         """Clear PWM output on this channel (do not close shared PCA9685 bus)"""
         try:
             self._pca.set_pwm(self._channel, 0, 0)
+        except Exception:
+            pass
+        try:
+            self._pca.release_channel(self._channel, self)
         except Exception:
             pass
 

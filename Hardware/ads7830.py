@@ -26,8 +26,11 @@ class ADS7830:
         Read ADC value from specified channel.
         :param channel: ADC input channel 0-7
         :return: 8-bit conversion result, range 0-255
+        :raise ValueError: channel is not an integer in 0-7
         """
-        channel = max(0, min(7, channel))
+        if not isinstance(channel, int) or isinstance(channel, bool) or not 0 <= channel <= 7:
+            # 静默钳位会让接错线表现为"读到别的通道数据"，这里直接报错
+            raise ValueError(f"ADC channel must be an integer in 0-7, got {channel!r}")
         reg = self._cmd | (((channel << 2 | channel >> 1) & 0x07) << 4)
         return self._bus.read_byte_data(self._address, reg)
 

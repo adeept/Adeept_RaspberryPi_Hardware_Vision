@@ -6,11 +6,12 @@
 SSD1306 OLED display driver based on luma.oled library.
 128x64 I2C interface, supports centered text wrapping and custom graphics.
 """
+import datetime
+import time
+
 from luma.core.interface.serial import i2c
 from luma.oled.device import ssd1306
 from PIL import Image, ImageDraw, ImageFont
-import datetime
-import time
 
 
 class OLED:
@@ -24,19 +25,111 @@ class OLED:
     :param font_size: Font size in pixels, default 16
     """
 
+    _FALLBACK_FONTS = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    )
+
     def __init__(self, i2c_port=1, i2c_address=0x3C, width=128, height=64,
                  font_path="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                  font_size=16):
         # Initialize I2C bus and OLED device
-        serial = i2c(port=i2c_port, address=i2c_address)
-        self.device = ssd1306(serial, width=width, height=height)
+        self._serial = i2c(port=i2c_port, address=i2c_address)
+        self.device = ssd1306(self._serial, width=width, height=height)
         self.width = width
         self.height = height
+        self._closed = False
 
+        self.font = self._load_font(font_path, font_size)
+
+    def _load_font(self, font_path, font_size):
+        """Try the requested font first, then the fallbacks, then Pillow's builtin."""
+        candidates = [font_path] if font_path else []
+        candidates.extend(self._FALLBACK_FONTS)
+
+        for path in candidates:
+            try:
+                return ImageFont.truetype(path, font_size)
+            except Exception:
+                continue
+
+        # Pillow >= 10.1 才支持 size 参数，更老的版本要退回默认字号
         try:
-            self.font = ImageFont.truetype(font_path, font_size)
-        except Exception:
-            self.font = ImageFont.load_default(size=font_size)
+            return ImageFont.load_default(size=font_size)
+        except TypeError:
+            return ImageFont.load_default()
+
+    @staticmethod
+    def _is_wide(char):
+        """Whether the char is a wide glyph (CJK, full-width punctuation)."""
+        code = ord(char)
+        return (0x1100 <= code <= 0x115F or 0x2E80 <= code <= 0xA4CF
+                or 0xAC00 <= code <= 0xD7A3 or 0xF900 <= code <= 0xFAFF
+                or 0xFE30 <= code <= 0xFE6F or 0xFF00 <= code <= 0xFF60
+                or 0xFFE0 <= code <= 0xFFE6)
+
+    @classmethod
+    def _tokenize(cls, text):
+        """Split a paragraph into layout units: single CJK chars, whole ASCII words."""
+        tokens, buffer = [], ""
+        for char in text:
+            if char.isspace():
+                if buffer:
+                    tokens.append(buffer)
+                    buffer = ""
+                continue
+            if cls._is_wide(char):
+                if buffer:
+                    tokens.append(buffer)
+                    buffer = ""
+                tokens.append(char)
+            else:
+                buffer += char
+        if buffer:
+            tokens.append(buffer)
+        return tokens
+
+    @classmethod
+    def _join(cls, current, token):
+        """Join two units, inserting a space only between two narrow (ASCII) units."""
+        if not current:
+            return token
+        if cls._is_wide(current[-1]) or cls._is_wide(token[0]):
+            return current + token
+        return current + " " + token
+
+    def _wrap_text(self, draw, text, font, max_width):
+        """
+        Wrap text to max_width.
+        ASCII words are kept whole; CJK has no spaces, so it wraps per character —
+        otherwise a long Chinese string would never break and run off the screen.
+        """
+        lines = []
+        for paragraph in text.splitlines() or [""]:
+            current = ""
+            for token in self._tokenize(paragraph):
+                candidate = self._join(current, token)
+                if draw.textlength(candidate, font=font) <= max_width:
+                    current = candidate
+                    continue
+
+                if current:
+                    lines.append(current)
+
+                # 单个单词本身就超宽时按字符硬切
+                while draw.textlength(token, font=font) > max_width and len(token) > 1:
+                    cut = len(token) - 1
+                    while cut > 1 and draw.textlength(token[:cut], font=font) > max_width:
+                        cut -= 1
+                    lines.append(token[:cut])
+                    token = token[cut:]
+
+                current = token
+
+            lines.append(current)
+
+        return [line for line in lines if line] or [""]
 
     def draw_centered_text(self, draw, text, y, fill=255, max_width=None, font=None):
         """
@@ -54,24 +147,13 @@ class OLED:
         if max_width is None:
             max_width = self.width - 4
 
-        lines = []
-        current_line = ""
-        for word in text.split():
-            test_line = current_line + word + " "
-            test_width = draw.textlength(test_line, font=font)
-            if test_width <= max_width:
-                current_line = test_line
-            else:
-                lines.append(current_line.rstrip())
-                current_line = word + " "
-        if current_line:
-            lines.append(current_line.rstrip())
+        ascent, descent = font.getmetrics()
+        line_height = ascent + descent
 
-        for line in lines:
+        for line in self._wrap_text(draw, text, font, max_width):
             line_w = draw.textlength(line, font=font)
-            x = (self.width - line_w) // 2
+            x = max(0, int((self.width - line_w) // 2))
             draw.text((x, y), line, font=font, fill=fill)
-            _, _, _, line_height = font.getbbox(line)
             y += line_height
         return y
 
@@ -92,7 +174,7 @@ class OLED:
     def show_text(self, text, y_start=8):
         """
         Quick method: directly display centered wrapped text on screen.
-        :param text: Text content (auto line break by word)
+        :param text: Text content (auto line break, explicit '\\n' is respected)
         :param y_start: Starting Y coordinate
         """
         image, draw = self.new_canvas()
@@ -100,11 +182,24 @@ class OLED:
         self.display(image)
 
     def close(self):
-        """Clear screen and release display resources"""
+        """Clear screen and release display resources. Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+
         try:
             self.clear()
         except Exception:
             pass
+
+        # luma 的 cleanup 在不同版本上不一定存在，按可用性调用
+        for obj in (self.device, self._serial):
+            cleanup = getattr(obj, "cleanup", None)
+            if callable(cleanup):
+                try:
+                    cleanup()
+                except Exception:
+                    pass
 
     def __enter__(self):
         return self

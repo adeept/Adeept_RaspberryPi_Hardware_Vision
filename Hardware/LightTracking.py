@@ -17,9 +17,10 @@ class LightTracking:
     :param bus_num: I2C bus number, default 1
     :param address: ADS7830 I2C address, default 0x48
     :param adc_device: Optional pre-initialized ADS7830 instance for hardware sharing
+    :param samples: Number of ADC samples averaged per read(), default 1 (no averaging)
     """
 
-    def __init__(self, channel=1, bus_num=1, address=0x48, adc_device=None):
+    def __init__(self, channel=1, bus_num=1, address=0x48, adc_device=None, samples=1):
         if adc_device is not None:
             # Reuse existing ADC instance to avoid duplicate I2C initialization
             self._adc = adc_device
@@ -29,13 +30,17 @@ class LightTracking:
             self._shared_adc = False
 
         self.channel = channel
+        self.samples = max(1, int(samples))
 
     def read(self):
         """
         Read current brightness value.
         :return: Brightness raw value, range 0-255
         """
-        return self._adc.analog_read(self.channel)
+        if self.samples == 1:
+            return self._adc.analog_read(self.channel)
+        total = sum(self._adc.analog_read(self.channel) for _ in range(self.samples))
+        return int(total / self.samples)
 
     def close(self):
         """Release resources; only closes ADC if not shared"""

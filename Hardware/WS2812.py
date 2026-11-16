@@ -6,12 +6,15 @@
 WS2812 addressable LED driver based on SPI bus.
 Compatible with Raspberry Pi 3/4/5.
 """
-import time
+import logging
 import sys
-import subprocess
 import threading
-import spidev
+import time
+
 import numpy as np
+import spidev
+
+logger = logging.getLogger(__name__)
 
 # ===================== Preset Color =====================
 BASE_COLORS = [
@@ -49,9 +52,15 @@ class WS2812(threading.Thread):
     def __init__(self, count=8, bright=255, sequence='GRB', bus=0, device=0):
         super().__init__(daemon=True)
 
+        if count < 1:
+            raise ValueError("LED count must be >= 1")
+
         self.led_count = count
-        self.led_brightness = bright
+        self.led_brightness = max(0, min(255, int(bright)))
         self.light_mode = "none"
+
+        self._spi_lock = threading.Lock()
+        self._stop_event = threading.Event()
 
         # Breath effect parameters
         self._breath_r = self._breath_g = self._breath_b = 0
@@ -100,12 +109,12 @@ class WS2812(threading.Thread):
             self.spi.open(bus, device)
             self.spi.mode = 0
             self.init_ok = 1
-        except OSError:
-            print("SPI init failed. Check /boot/firmware/config.txt")
+        except OSError as exc:
+            logger.warning("SPI init failed: %s", exc)
             if bus == 0:
-                print("Enable SPI: raspi-config or add dtparam=spi=on")
+                logger.warning("Enable SPI: raspi-config or add dtparam=spi=on")
             else:
-                print(f"Add dtoverlay=spi{bus}-2cs then reboot")
+                logger.warning("Add dtoverlay=spi%s-2cs then reboot", bus)
 
     def is_ready(self):
         """Check if SPI and LEDs are initialized successfully"""
@@ -113,7 +122,7 @@ class WS2812(threading.Thread):
 
     def set_brightness(self, bright):
         """Dynamically adjust global brightness and refresh immediately"""
-        bright = max(0, min(255, bright))
+        bright = max(0, min(255, int(bright)))
         self.led_brightness = bright
         # Re-apply all colors with new brightness
         for i in range(self.led_count):
@@ -167,36 +176,46 @@ class WS2812(threading.Thread):
         if not self.init_ok:
             return
 
-        data = np.array(self._color_buf).ravel()
+        with self._spi_lock:
+            if self.spi is None:
+                return
 
-        if mode == 1:
-            # 8-bit timing encoding
-            tx = np.zeros(len(data) * 8, dtype=np.uint8)
-            for ibit in range(8):
-                tx[7 - ibit::8] = ((data >> ibit) & 1) * 0x78 + 0x80
-            speed = int(8 / 1.25e-6) if self._bus == 0 else int(8 / 1.0e-6)
-        else:
-            # 4-bit timing encoding
-            tx = np.zeros(len(data) * 4, dtype=np.uint8)
-            for ibit in range(4):
-                tx[3 - ibit::4] = (
-                    ((data >> (2 * ibit + 1)) & 1) * 0x60
-                    + ((data >> (2 * ibit + 0)) & 1) * 0x06
-                    + 0x88
-                )
-            speed = int(4 / 1.25e-6) if self._bus == 0 else int(4 / 1.0e-6)
+            data = np.array(self._color_buf).ravel()
 
-        self.spi.xfer(tx.tolist(), speed)
+            if mode == 1:
+                # 8-bit timing encoding
+                tx = np.zeros(len(data) * 8, dtype=np.uint8)
+                for ibit in range(8):
+                    tx[7 - ibit::8] = ((data >> ibit) & 1) * 0x78 + 0x80
+                speed = int(8 / 1.25e-6) if self._bus == 0 else int(8 / 1.0e-6)
+            else:
+                # 4-bit timing encoding
+                tx = np.zeros(len(data) * 4, dtype=np.uint8)
+                for ibit in range(4):
+                    tx[3 - ibit::4] = (
+                        ((data >> (2 * ibit + 1)) & 1) * 0x60
+                        + ((data >> (2 * ibit + 0)) & 1) * 0x06
+                        + 0x88
+                    )
+                speed = int(4 / 1.25e-6) if self._bus == 0 else int(4 / 1.0e-6)
+
+            self.spi.xfer(tx.tolist(), speed)
 
     # ===================== Animation Control =====================
+    def _require_started(self):
+        if not self.is_alive():
+            raise RuntimeError("call WS2812.start() before starting an animation")
+
     def start_breath(self, r, g, b):
         """Start breathing light animation (background thread)"""
+        self._require_started()
         self.light_mode = "breath"
         self._breath_r, self._breath_g, self._breath_b = r, g, b
         self._event.set()
 
     def start_police(self):
         """Start police flash animation (background thread)"""
+        self._require_started()
         self.light_mode = "police"
         self._event.set()
 
@@ -213,7 +232,7 @@ class WS2812(threading.Thread):
 
     # ===================== Animation Tasks =====================
     def _breath_task(self):
-        while self.light_mode == "breath":
+        while self.light_mode == "breath" and not self._stop_event.is_set():
             # Fade in
             for i in range(self.breath_steps):
                 ratio = i / self.breath_steps
@@ -234,7 +253,7 @@ class WS2812(threading.Thread):
                 time.sleep(0.03)
 
     def _police_task(self):
-        while self.light_mode == "police":
+        while self.light_mode == "police" and not self._stop_event.is_set():
             # Blue flash
             for _ in range(3):
                 self.set_all_color(0, 0, 255)
@@ -252,21 +271,33 @@ class WS2812(threading.Thread):
 
     def run(self):
         """Thread main loop"""
-        while True:
-            self._event.wait()
+        while not self._stop_event.is_set():
+            self._event.wait(0.1)
+            if self._stop_event.is_set():
+                break
             if self.light_mode == "breath":
                 self._breath_task()
             elif self.light_mode == "police":
                 self._police_task()
 
     def close(self):
-        """Turn off all LEDs and release SPI resources"""
-        try:
-            self.pause()
-            if self.spi:
-                self.spi.close()
-        except Exception as e:
-            print(f"WS2812 close error: {e}")
+        """Stop the animation thread, turn off all LEDs and release SPI resources"""
+        self._stop_event.set()
+        self._event.set()          # 唤醒可能阻塞在 wait() 的线程
+        self.light_mode = "none"
+
+        if self.is_alive():
+            self.join(timeout=1.0)
+            if self.is_alive():
+                logger.warning("animation thread did not stop within 1s")
+
+        with self._spi_lock:
+            if self.spi is not None:
+                try:
+                    self.spi.close()
+                except Exception as exc:
+                    logger.warning("SPI close failed: %s", exc)
+                self.spi = None
 
     def __enter__(self):
         return self

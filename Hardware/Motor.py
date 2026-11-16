@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 # File name   : Motor.py
 # Website     : www.Adeept.com
@@ -32,6 +31,14 @@ class DCMotor:
         self._ch_neg = channel_neg
         self._decay_mode = self.SLOW_DECAY
         self._throttle = None
+
+        pca_device.claim_channel(channel_pos, self)
+        try:
+            pca_device.claim_channel(channel_neg, self)
+        except Exception:
+            # 第二个通道被占用时，回滚第一个通道的认领
+            pca_device.release_channel(channel_pos, self)
+            raise
 
     @property
     def throttle(self):
@@ -109,6 +116,11 @@ class DCMotor:
     def close(self):
         """Disable this motor without closing the shared PCA9685."""
         self.coast()
+        try:
+            self._pca.release_channel(self._ch_pos, self)
+            self._pca.release_channel(self._ch_neg, self)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

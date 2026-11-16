@@ -36,8 +36,12 @@ class HT16K33Matrix:
         self.bus.write_byte(self.addr, 0x21)
         # Enable display, disable blinking
         self.bus.write_byte(self.addr, 0x81)
-        # Set brightness (0xE0 ~ 0xEF corresponds to level 0 ~ 15)
-        brightness = max(0, min(15, brightness))
+        self.set_brightness(brightness)
+
+    def set_brightness(self, brightness: int):
+        """Set display brightness, range 0 ~ 15"""
+        brightness = max(0, min(15, int(brightness)))
+        # 0xE0 ~ 0xEF corresponds to level 0 ~ 15
         self.bus.write_byte(self.addr, 0xE0 | brightness)
 
     def clear(self):
@@ -60,9 +64,11 @@ class HT16K33Matrix:
         self.bus.write_i2c_block_data(self.addr, 0x00, display_data)
 
     def close(self):
-        """Release resources: clear display and close I2C connection"""
+        """Release resources: blank the display, stop the oscillator, close I2C"""
         try:
             self.clear()
+            # 关振荡器顺手熄灭显示，避免断开后残留点亮
+            self.bus.write_byte(self.addr, 0x20)
         finally:
             self.bus.close()
 

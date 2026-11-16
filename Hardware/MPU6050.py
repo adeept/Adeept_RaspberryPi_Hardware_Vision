@@ -26,12 +26,18 @@ class MPU6050:
         self._sensor = mpu6050(address, bus=bus)
         self._yaw = 0.0
         self._last_gyro_time = None
+        self._closed = False
+
+    def _ensure_open(self):
+        if self._closed:
+            raise RuntimeError("MPU6050 is closed")
 
     def get_accel_data(self):
         """
         Get raw accelerometer readings.
         :return: Dict with keys 'x', 'y', 'z', unit: g (gravity)
         """
+        self._ensure_open()
         return self._sensor.get_accel_data()
 
     def get_gyro_data(self):
@@ -39,6 +45,7 @@ class MPU6050:
         Get raw gyroscope readings.
         :return: Dict with keys 'x', 'y', 'z', unit: °/s
         """
+        self._ensure_open()
         return self._sensor.get_gyro_data()
 
     def get_temperature(self):
@@ -74,6 +81,7 @@ class MPU6050:
         :param samples: Number of samples for averaging, default 10
         :return: Tuple (roll_avg, pitch_avg, yaw_avg) in degrees
         """
+        samples = max(1, int(samples))
         roll_sum = 0.0
         pitch_sum = 0.0
         for _ in range(samples):
@@ -89,7 +97,7 @@ class MPU6050:
         :return: Current yaw angle in degrees, range [-180, 180]
         """
         gyro = self.get_gyro_data()
-        now = time.time()
+        now = time.monotonic()
 
         if self._last_gyro_time is None:
             self._last_gyro_time = now
@@ -99,11 +107,9 @@ class MPU6050:
         self._last_gyro_time = now
         # Integrate Z-axis angular rate over time
         self._yaw += gyro['z'] * dt
-        # Normalize angle to [-180, 180]
-        if self._yaw > 180:
-            self._yaw -= 360
-        elif self._yaw < -180:
-            self._yaw += 360
+        self._yaw %= 360.0
+        if self._yaw > 180.0:
+            self._yaw -= 360.0
         return self._yaw
 
     def reset_yaw(self):
@@ -112,7 +118,11 @@ class MPU6050:
         self._last_gyro_time = None
 
     def close(self):
-        """Release sensor resources."""
+        """Release sensor resources. Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+
         if self.bus is not None:
             self.bus.close()
             self.bus = None

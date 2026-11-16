@@ -6,6 +6,7 @@
 NEC protocol IR receiver driver based on gpiozero.
 Supports polling read and callback mode, with built-in key mapping.
 """
+import threading
 import time
 from gpiozero import DigitalInputDevice
 
@@ -18,6 +19,11 @@ class IRReceiver:
     :param tolerance: Timing tolerance ratio, default 0.5
     :param min_normal_pulses: Minimum pulse count for a valid frame
     :param repeat_pulses: Pulse count for repeat code
+
+    Attributes:
+        last_frame: (address, data) of the most recently decoded frame. Since every
+            read consumes the pulse buffer, use this to get the raw code after read_key()
+            for the same key press; repeated presses update it again.
     """
 
     REPEAT = "repeat"
@@ -55,6 +61,8 @@ class IRReceiver:
 
         # Pulse timestamp buffer (level, timestamp_us)
         self._pulse_timestamps = []
+        self._lock = threading.Lock()
+        self.last_frame = None
         # Optional callback function for key press event
         self.on_key_press = None
 
@@ -71,15 +79,14 @@ class IRReceiver:
     def _pulse_callback(self, level):
         """Interrupt callback: record pulse edge timestamp in microseconds"""
         timestamp = time.time_ns() // 1000
-        self._pulse_timestamps.append((level, timestamp))
-        if len(self._pulse_timestamps) > 200:
-            self._pulse_timestamps.pop(0)
+        with self._lock:
+            self._pulse_timestamps.append((level, timestamp))
+            if len(self._pulse_timestamps) > 200:
+                self._pulse_timestamps.pop(0)
 
     @staticmethod
     def _calculate_time_diff(t1, t2):
-        """Calculate time difference with overflow handling"""
-        if t1 > t2:
-            return (0xFFFFFFFF - t1) + t2
+        """Calculate time difference between two edges (microseconds)"""
         return t2 - t1
 
     def _is_within_tolerance(self, measured, expected):
@@ -96,8 +103,9 @@ class IRReceiver:
         if len(self._pulse_timestamps) < 4:
             return None
 
-        pulses = self._pulse_timestamps.copy()
-        self._pulse_timestamps.clear()
+        with self._lock:
+            pulses = self._pulse_timestamps.copy()
+            self._pulse_timestamps.clear()
         pulse_count = len(pulses)
 
         if pulse_count == 4:
@@ -148,6 +156,8 @@ class IRReceiver:
         :return: (address, data) tuple, REPEAT constant, or None if no new frame
         """
         result = self._decode_nec()
+        if isinstance(result, tuple):
+            self.last_frame = result
         if result is not None and callable(self.on_key_press):
             # Trigger callback if set
             self.on_key_press(result)
@@ -209,8 +219,7 @@ if __name__ == "__main__":
                     print("[REPEAT]")
                     continue
 
-                # Also get raw address/data for debugging
-                raw = ir.read_raw()
+                raw = ir.last_frame
                 if isinstance(raw, tuple):
                     addr, dat = raw
                     print(f"ADDR: 0x{addr:02X} | DATA: 0x{dat:02X} | KEY: {key}")
