@@ -2,121 +2,93 @@
 # File name   : app.py
 # Website     : www.Adeept.com
 # Author      : Adeept
-"""
-Flask web server with decoupled vision + control architecture.
-Web streaming and robot control run in separate threads.
-"""
-from importlib import import_module
-import os
-from flask import Flask, render_template, Response, send_from_directory
-from flask_cors import *
-import threading
+"""Flask view layer for the video stream (presentation only, no vision_api import).
 
-# Import adapter instead of original camera_opencv
-from camera_web_adapter import Camera
-from vision_system import VisionSystem
-from robot_control_worker import RobotControlWorker
+Scope: HTTP routes, MJPEG streaming and static files under dist/. 
+"""
+import os
+import threading
+import time
+
+from flask import Flask, Response, send_from_directory
+from flask_cors import *
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
 
 dir_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
+_stream = None          # callable() -> (seq, jpeg_bytes)
+_ready = None           # callable() -> bool
+_bind_lock = threading.Lock()
 
-# ====== Initialize shared vision system & control worker ======
-vision_sys = VisionSystem(camera_type="auto", width=640, height=480)
-vision_sys.start()
+def bind_stream(stream_fn, ready_fn=None):
+    """Inject the frame source (called by vision_api on startup).
 
-# Bind vision system to web camera adapter
-Camera.bind_vision_system(vision_sys)
+    :param stream_fn: returns (seq, jpeg_bytes); None bytes means no frame yet
+    :param ready_fn: returns whether vision is running; False ends the stream
+    """
+    global _stream, _ready
+    with _bind_lock:
+        _stream = stream_fn
+        _ready = ready_fn
 
-# Start independent robot control thread
-control_worker = RobotControlWorker(vision_sys)
-control_worker.start()
+def _is_ready():
+    return True if _ready is None else bool(_ready())
 
-camera = Camera()
-
-
-def gen(camera):
+def gen():
+    last_seq = -1
     while True:
-        frame = camera.get_frame()
+        if not _is_ready():
+            return                      # vision stopped: end the stream, do not hang
+        if _stream is None:
+            time.sleep(0.05)
+            continue
+        seq, jpeg = _stream()
+        if jpeg is None:
+            time.sleep(0.02)
+            continue
+        if seq == last_seq:             # same frame: skip, a slow client drops frames
+            time.sleep(0.005)
+            continue
+        last_seq = seq
         yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+               b'Content-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
 
-
+# ====== Routes ======
 @app.route('/video_feed')
 def video_feed():
-    return Response(gen(camera),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    if _stream is None or not _is_ready():
+        return Response(b"vision system is not running\n", status=503)
+    return Response(gen(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-
-# ====== All original static file routes remain unchanged ======
 @app.route('/api/img/<path:filename>')
 def sendimg(filename):
-    return send_from_directory(dir_path+'/dist/img', filename)
+    return send_from_directory(dir_path + '/dist/img', filename)
 
 @app.route('/js/<path:filename>')
 def sendjs(filename):
-    return send_from_directory(dir_path+'/dist/js', filename)
+    return send_from_directory(dir_path + '/dist/js', filename)
 
 @app.route('/css/<path:filename>')
 def sendcss(filename):
-    return send_from_directory(dir_path+'/dist/css', filename)
+    return send_from_directory(dir_path + '/dist/css', filename)
 
 @app.route('/api/img/icon/<path:filename>')
 def sendicon(filename):
-    return send_from_directory(dir_path+'/dist/img/icon', filename)
+    return send_from_directory(dir_path + '/dist/img/icon', filename)
 
 @app.route('/fonts/<path:filename>')
 def sendfonts(filename):
-    return send_from_directory(dir_path+'/dist/fonts', filename)
+    return send_from_directory(dir_path + '/dist/fonts', filename)
 
 @app.route('/<path:filename>')
 def sendgen(filename):
-    return send_from_directory(dir_path+'/dist', filename)
+    return send_from_directory(dir_path + '/dist', filename)
 
 @app.route('/')
 def index():
-    return send_from_directory(dir_path+'/dist', 'index.html')
-
-
-class webapp:
-    def __init__(self):
-        self.camera = camera
-
-    def modeselect(self, modeInput):
-        Camera.modeSelect = modeInput
-        vision_sys.set_mode(modeInput)
-
-    def modeselectApp(self, modeInput):
-        vision_sys.set_app_mode(True)
-        Camera.modeSelect = modeInput
-        vision_sys.set_mode(modeInput)
-
-    def colorFindSet(self, H, S, V):
-        camera.colorFindSet(H, S, V)
-
-    def colorFindSetApp(self, H, S, V):
-        camera.colorFindSetApp(H, S, V)
-
-    def thread(self):
-        app.run(host='0.0.0.0', port=5000, threaded=True)
-
-    def startthread(self):
-        fps_threading = threading.Thread(target=self.thread)
-        fps_threading.daemon = False
-        fps_threading.start()
-
+    return send_from_directory(dir_path + '/dist', 'index.html')
 
 if __name__ == "__main__":
-    WEB = webapp()
-    try:
-        WEB.startthread()
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        control_worker.stop()
-        vision_sys.stop()
-    except Exception as e:
-        print(f"Exit: {e}")
-        control_worker.stop()
-        vision_sys.stop()
+    print("app.py is the Flask view layer, start with: sudo python3 vision_api.py [auto|usb|csi]")
