@@ -350,7 +350,7 @@ class VisionProcessor(object):
     _FONT = cv2.FONT_HERSHEY_SIMPLEX
     _C_OK = (80, 240, 60)           # green: target found / locked
     _C_WARN = (0, 200, 255)         # amber: lost, holding, uncertain
-    _C_ACCENT = (255, 220, 0)       # cyan: scan rows, guides, corner marks
+    _C_ACCENT = (0, 127, 255)       # cyan: scan rows, guides, corner marks
     _C_DIM = (170, 170, 170)        # grey: idle text and reference lines
     _C_DARK = (0, 0, 0)
 
@@ -417,21 +417,21 @@ class VisionProcessor(object):
 
         p1 = min(max(int(self.line_pos_1), 1), h - 2)
         p2 = min(max(int(self.line_pos_2), 1), h - 2)
-        x_ref = (w - 1) // 2
         name = "WHITE" if self.line_color_value == 255 else "BLACK"
 
-        self._dash_v(frame, x_ref, 0, h - 1, self._C_DIM)              # straight-ahead reference
+        p_hight = int(abs(abs(self.line_pos_1) - abs(self.line_pos_2)) / 2) - 10
+
         self._dash_h(frame, p1, 0, w - 1, self._C_ACCENT)              # scan rows
         self._dash_h(frame, p2, 0, w - 1, self._C_ACCENT)
 
         if result.line_found and result.line_center is not None:
             # Detected run on each scan row, thicker than the halo of the guide lines
-            self._halo_line(frame, (result.line_left_1, p1), (result.line_right_1, p1), self._C_OK, 3)
-            self._halo_line(frame, (result.line_left_2, p2), (result.line_right_2, p2), self._C_OK, 3)
+            self._halo_line(frame, (result.line_left_1, p1), (result.line_right_1, p1), self._C_OK, 2)
+            self._halo_line(frame, (result.line_left_2, p2), (result.line_right_2, p2), self._C_OK, 2)
             # Line centre between the two rows
             mid_y = (p1 + p2) // 2
-            self._halo_line(frame, (result.line_center, mid_y - 26),
-                            (result.line_center, mid_y + 26), self._C_OK, 3)
+            self._halo_line(frame, (result.line_center, mid_y - p_hight),
+                            (result.line_center, mid_y + p_hight), self._C_OK, 2)
             self._chip(frame, "LINE %s  err %+.2f  x %d" %
                        (name, result.line_error, result.line_center), self._C_OK, scale)
         else:
@@ -440,8 +440,8 @@ class VisionProcessor(object):
     def _draw_color(self, frame, result, h, w, scale):
         # Fixed crosshair marks the optical axis; the target circle is compared against it
         x_ref, y_ref = (w - 1) // 2, h // 2
-        self._halo_line(frame, (x_ref - 18, y_ref), (x_ref + 18, y_ref), self._C_ACCENT, 2)
-        self._halo_line(frame, (x_ref, y_ref - 18), (x_ref, y_ref + 18), self._C_ACCENT, 2)
+        self._halo_line(frame, (x_ref - 10, y_ref), (x_ref + 10, y_ref), self._C_ACCENT, 1)
+        self._halo_line(frame, (x_ref, y_ref - 10), (x_ref, y_ref + 10), self._C_ACCENT, 1)
 
         if result.color_detected:
             cx, cy = int(result.color_center_x), int(result.color_center_y)
@@ -450,8 +450,8 @@ class VisionProcessor(object):
             cv2.circle(frame, (cx, cy), 7, self._C_DARK, -1, cv2.LINE_AA)
             cv2.circle(frame, (cx, cy), 3, self._C_OK, -1, cv2.LINE_AA)
             self._error_bar(frame, result.color_error_x, self._C_OK)
-            self._chip(frame, "COLOR  err %+.2f  r %d  a %d" %
-                       (result.color_error_x, int(result.color_radius), result.color_area),
+            self._chip(frame, "COLOR  err %+.2f  r %d" %
+                       (result.color_error_x, int(result.color_radius)),
                        self._C_OK, scale)
         elif result.color_recent:
             self._chip(frame, "COLOR  HOLD", self._C_WARN, scale)
@@ -468,9 +468,6 @@ class VisionProcessor(object):
         x2, y2 = x + int(result.motion_rect[2]), y + int(result.motion_rect[3])
         cv2.rectangle(frame, (x, y), (x2, y2), color, 1, cv2.LINE_AA)  # thin frame
         self._corners(frame, result.motion_rect, self._C_ACCENT)        # thick corners
-        for box in result.motion_boxes[1:]:                            # secondary blobs, thin
-            cv2.rectangle(frame, (int(box[0]), int(box[1])),
-                          (int(box[0] + box[2]), int(box[1] + box[3])), self._C_DIM, 1, cv2.LINE_AA)
 
         ratio = 100.0 * result.motion_area / float(w * h)
         state = "LOCK" if result.motion_detected else "HOLD"
