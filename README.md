@@ -6,6 +6,12 @@ This repository maintains hardware components, vision modules, and vision-voice 
 - **Hardware**  
   Hardware-related components and supporting files for Adeept Raspberry Pi robot kits.
 
+- **Motion**  
+  Motion layer on top of `Hardware.Servo`: smooth, velocity-limited trajectories for
+  up to 16 joints, driven by one clock that the caller owns. Includes a keyboard
+  calibration tool and the per-channel table it writes
+  (`~/.adeept/servo_calibration.json`), which every boot reuses.
+
 - **Vision**  
   Vision functional modules, including camera drivers and OpenCV-based processing code. MediaPipe-related features will be added in subsequent updates.
 
@@ -34,6 +40,210 @@ touch the class:
 
 ```python
 from Hardware import Servo, DCMotor, PCA9685
+```
+
+## Using the Motion module
+
+`Hardware.Servo` answers "put the horn at angle X now". `Motion` adds the two
+things a walking robot needs on top of that: a smooth, velocity-limited
+trajectory, and one clock shared by all sixteen joints.
+
+`Motion` imports `Hardware` as a sibling package, so the two folders travel
+together:
+
+```
+|-- Hardware/
+|-- Motion/
+```
+
+### Files
+
+| file | role |
+| --- | --- |
+| `profile.py` | S-curve / linear travel, pure maths, no clock |
+| `joint.py` | one servo: logical angle, limits, deadband, trajectory |
+| `servo_bank.py` | up to 16 joints sharing one clock and one I2C bus |
+| `calibration.py` | per-channel `neutral` / `direction` / `min` / `max`, JSON on disk |
+| `calibrate.py` | keyboard tool that measures and writes that table |
+
+### Running the demos
+
+```bash
+python3 -m Motion             # sweep + pose + retarget, uses the saved table
+python3 -m Motion.calibrate   # keyboard calibration, writes the JSON table
+```
+
+`python3 -m Motion` prints `calibration: ...` when the table is missing or stale
+and then runs on the defaults, so the demo doubles as a boot check.
+
+### Non-blocking usage
+
+The library never keeps time. Your loop owns the clock and passes `dt` in, so
+one scheduler drives every joint and their phases cannot drift apart:
+
+```python
+import time
+from Hardware import PCA9685
+from Motion import ServoBank, ServoCalibration
+
+cal  = ServoCalibration.load()                     # ~/.adeept/servo_calibration.json
+pca  = PCA9685(bus_num=1, address=0x5F, freq=50)   # share the bus with Motor
+bank = ServoBank(pca, count=cal.count, actuation_range=cal.actuation_range,
+                 config=cal.to_config())           # pca=None creates its own chip
+
+bank.move_all({0: 60, 1: 120}, duration=0.8)       # both arrive on the same tick
+
+while bank.update(0.02):                           # 50 Hz
+    time.sleep(0.02)
+```
+
+Leave `config` out and the bank runs on defaults: `neutral` 90, `direction` +1,
+every channel `0..actuation_range`. That is fine for a bench test and wrong on
+a real robot, whose mid positions are never all 90.
+
+`move_all` returns the common duration it used, so a caller can log it or pick
+its own tick count.
+
+### API
+
+`ServoBank`:
+
+| call | meaning |
+| --- | --- |
+| `move_to(ch, angle, duration=None)` | one joint, S-curve |
+| `move_all({ch: angle}, duration=None)` | several joints, one shared arrival tick |
+| `pose({ch: offset}, duration=None)` | relative to `neutral`, flipped by `direction` |
+| `update(dt)` | advance everything, `True` while still moving |
+| `jump_all({ch: angle})` | no ramp, for start-up poses and recovery |
+| `stop_all()` | drop the trajectories and hold the pose |
+| `angles()` | current logical angle of every joint |
+| `busy` | `True` while any joint is still moving |
+| `close()` / `with ServoBank(...) as bank` | release every channel, then the chip it owns |
+
+`Joint` (reach it as `bank[ch]`):
+
+| call | meaning |
+| --- | --- |
+| `move_to(angle, duration=None)` | smooth move, `False` when already there |
+| `required_duration(angle, ...)` | what the limits would cost, without moving |
+| `jump(angle)` | immediate write, bypassing every ramp |
+| `angle` | current absolute angle, degrees |
+| `to_absolute(offset)` | `neutral + direction * offset` |
+| `writes` | how many I2C writes this joint made, for chasing a dead channel |
+
+`ServoCalibration`:
+
+| call | meaning |
+| --- | --- |
+| `load(path=None, count=16, strict=False)` | read the table, record `.error` |
+| `save(path=None)` | atomic write, returns the path |
+| `to_config()` | dict ready for `ServoBank(config=...)` |
+| `validate()` | list of human readable problems |
+| `summary()` | one line per channel, for logs |
+| `channel_of(name)` | channel index from its name |
+| `set(ch, neutral=…, min=…, max=…, direction=…, name=…)` | edit one entry |
+
+There is no `pause()` / `resume()` and no thread: simply stop calling
+`update()` to pause, and call `jump_all()` on the safety path so a stop never
+waits behind a ramp.
+
+### Per-channel tuning
+
+```python
+cfg = cal.to_config()                              # calibrated neutral / direction / limits
+cfg[0].update({"max_vel": 120, "max_acc": 600})   # gait limits on top
+bank = ServoBank(pca, count=cal.count, actuation_range=cal.actuation_range,
+                 config=cfg)                      # pca=None creates its own chip
+```
+
+Any key left out keeps its default, and a channel missing from `config` uses all
+defaults, so the two sources compose: the table owns the geometry, the program
+owns the speed.
+
+`max_vel` (deg/s) and `max_acc` (deg/s^2) are the per-joint defaults whenever a
+call does not pass its own. Duration is raised automatically so the limits
+always hold, for an S-curve of travel `d` and duration `T`:
+
+```text
+v_peak = 1.5 * d / T      a_peak = 6.0 * d / T^2
+```
+
+Calling `move_all` again mid-move retargets from the current position, so a
+changed command never produces a jump.
+
+### Calibration
+
+`neutral`, `direction` and the mechanical `min` / `max` are properties of the
+machine, not of the code. They are measured once with a keyboard tool and then
+reused on every boot. Put the robot on blocks and run:
+
+```bash
+python3 -m Motion.calibrate
+```
+
+Pressing `s` reports what was written for the channel on screen, then the file
+it went to:
+
+```
+ >> saved ch3: neutral=90.0 min=10.0 max=170.0 dir=+1
+ >> -> /home/adeept/.adeept/servo_calibration.json
+```
+
+
+| key | meaning |
+| --- | --- |
+| `[n]` / `[p]` | next / previous channel |
+| `[+/-]` | nudge the current servo by one step |
+| `[1..9]` | step size in degrees (`0` = 10°) |
+| `[c]` | capture the current angle as `neutral` (offset 0) |
+| `[l]` / `[h]` | capture the current angle as the `min` / `max` limit |
+| `[d]` | flip the direction of the current channel |
+| `[t]` | sweep every channel `min` → `max` → `neutral` |
+| `[s]` / `[r]` | save to disk / reload from disk |
+| `[q]` | quit (twice when there are unsaved edits) |
+
+Channels are numbered 0..15, the same numbering as the PCA9685.
+
+The table is written to `~/.adeept/servo_calibration.json` (override with
+`--path`). Writing goes through a temporary file and a rename, so an interrupted
+save cannot leave half a JSON file behind.
+
+```json
+{
+  "version": 1,
+  "count": 16,
+  "actuation_range": 180.0,
+  "saved": "2026-11-18 10:24:31",
+  "servos": {
+    "0": {"name": "ch0", "neutral": 88.5, "direction": -1,
+          "min": 12.0, "max": 169.0}
+  }
+}
+```
+
+### Booting from the table
+
+
+```python
+from Motion import ServoBank, ServoCalibration
+
+cal  = ServoCalibration.load()                       # never raises on a bad file
+bank = ServoBank(pca, count=cal.count, actuation_range=cal.actuation_range,
+                 config=cal.to_config())
+
+# called once at start-up, so a stale table is visible in the log
+if cal.error:                                        # missing / unreadable / count mismatch
+    print("calibration:", cal.error)                 # defaults are in use
+for problem in cal.validate():
+    print("calibration:", problem)
+```
+
+Under a systemd service, `~` is whatever `$HOME` the unit was given — unset, it
+becomes `/root` and the table is silently not found. Either set
+`Environment=HOME=/home/adeept` in the unit, or pass the path explicitly:
+
+```python
+cal = ServoCalibration.load("/home/adeept/.adeept/servo_calibration.json")
 ```
 
 ## Using the Vision module
