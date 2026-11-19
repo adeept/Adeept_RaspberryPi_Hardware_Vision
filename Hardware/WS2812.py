@@ -5,6 +5,9 @@
 """
 WS2812 addressable LED driver based on SPI bus.
 Compatible with Raspberry Pi 3/4/5.
+
+Animations: breath, police, rainbow and flowing, all driven by the background
+thread started with ``start()``.
 """
 import logging
 import sys
@@ -38,6 +41,35 @@ def generate_color_sequences():
     """Generate cyclic color shift sequences for marquee effect"""
     return [BASE_COLORS[i:] + BASE_COLORS[:i] for i in range(len(BASE_COLORS))]
 
+
+def _hsv_to_rgb(hue, saturation=100, value=100):
+    """
+    Convert HSV to an (R, G, B) tuple.
+    :param hue: Hue in degrees, wrapped into 0-360
+    :param saturation: Saturation in percent, 0-100
+    :param value: Brightness in percent, 0-100
+    :return: (r, g, b) integers, 0-255
+    """
+    hue %= 360
+    sat = max(0, min(100, saturation)) / 100.0
+    val = max(0, min(100, value)) / 100.0
+
+    chroma = val * sat
+    sector = hue / 60.0
+    second = chroma * (1 - abs(sector % 2 - 1))
+    match = min(int(sector), 5)
+    rgb = [
+        (chroma, second, 0),
+        (second, chroma, 0),
+        (0, chroma, second),
+        (0, second, chroma),
+        (second, 0, chroma),
+        (chroma, 0, second),
+    ][match]
+
+    offset = val - chroma
+    return tuple(int(round((component + offset) * 255)) for component in rgb)
+
 # ===================== WS2812 Driver Class =====================
 class WS2812(threading.Thread):
     """
@@ -65,6 +97,17 @@ class WS2812(threading.Thread):
         # Breath effect parameters
         self._breath_r = self._breath_g = self._breath_b = 0
         self.breath_steps = 10
+
+        # Rainbow effect parameters
+        self._rainbow_offset = 0
+        self._rainbow_step = 6
+        self._rainbow_interval = 0.02
+
+        # Flowing effect parameters
+        self._flow_r = self._flow_g = self._flow_b = 0
+        self._flow_head = 0
+        self._flow_tail = max(1, count // 3)
+        self._flow_interval = 0.06
 
         # Color order parsing
         self._parse_color_order(sequence)
@@ -219,6 +262,38 @@ class WS2812(threading.Thread):
         self.light_mode = "police"
         self._event.set()
 
+    def start_rainbow(self, step=6, interval=0.02):
+        """
+        Start rainbow animation: every pixel sits on its own hue, the whole
+        gradient rotates along the strip (background thread).
+        :param step: Hue advance per frame in degrees, default 6
+        :param interval: Frame interval in seconds, default 0.02
+        """
+        self._require_started()
+        self.light_mode = "rainbow"
+        self._rainbow_step = max(1, int(step))
+        self._rainbow_interval = max(0.0, float(interval))
+        self._rainbow_offset = 0
+        self._event.set()
+
+    def start_flowing(self, r, g, b, interval=0.06, tail=None):
+        """
+        Start flowing animation: a bright head runs along the strip and leaves a
+        fading tail behind it (background thread).
+        :param r: Head color red, 0-255
+        :param g: Head color green, 0-255
+        :param b: Head color blue, 0-255
+        :param interval: Time between two head moves in seconds, default 0.06
+        :param tail: Pixels covered by the tail, default one third of the strip
+        """
+        self._require_started()
+        self.light_mode = "flowing"
+        self._flow_r, self._flow_g, self._flow_b = r, g, b
+        self._flow_interval = max(0.01, float(interval))
+        self._flow_tail = max(1, int(tail or max(1, self.led_count // 3)))
+        self._flow_head = 0
+        self._event.set()
+
     def stop_animation(self):
         """Stop animation, keep current color"""
         self.light_mode = "none"
@@ -269,6 +344,34 @@ class WS2812(threading.Thread):
                 time.sleep(0.05)
             time.sleep(0.1)
 
+    def _rainbow_task(self):
+        while self.light_mode == "rainbow" and not self._stop_event.is_set():
+            # 每个像素在色环上按序号均匀分布，整体偏移让彩虹沿着灯带流动
+            for i in range(self.led_count):
+                hue = (self._rainbow_offset + i * 360 / self.led_count) % 360
+                self.set_pixel(i, *_hsv_to_rgb(hue))
+            self.show()
+            self._rainbow_offset = (self._rainbow_offset + self._rainbow_step) % 360
+            time.sleep(self._rainbow_interval)
+
+    def _flowing_task(self):
+        while self.light_mode == "flowing" and not self._stop_event.is_set():
+            for i in range(self.led_count):
+                self.set_pixel(i, 0, 0, 0)
+            # 头部最亮，越靠后的尾巴越暗，形成拖尾
+            for offset in range(self._flow_tail):
+                index = (self._flow_head - offset) % self.led_count
+                ratio = 1.0 - offset / self._flow_tail
+                self.set_pixel(
+                    index,
+                    round(self._flow_r * ratio),
+                    round(self._flow_g * ratio),
+                    round(self._flow_b * ratio),
+                )
+            self.show()
+            self._flow_head = (self._flow_head + 1) % self.led_count
+            time.sleep(self._flow_interval)
+
     def run(self):
         """Thread main loop"""
         while not self._stop_event.is_set():
@@ -279,6 +382,10 @@ class WS2812(threading.Thread):
                 self._breath_task()
             elif self.light_mode == "police":
                 self._police_task()
+            elif self.light_mode == "rainbow":
+                self._rainbow_task()
+            elif self.light_mode == "flowing":
+                self._flowing_task()
 
     def close(self):
         """Stop the animation thread, turn off all LEDs and release SPI resources"""
@@ -334,7 +441,17 @@ if __name__ == '__main__':
         time.sleep(4)
         led_strip.stop_animation()
 
-        print("=== Test 4: Cyclic color marquee ===")
+        print("=== Test 4: Rainbow effect ===")
+        led_strip.start_rainbow()
+        time.sleep(4)
+        led_strip.stop_animation()
+
+        print("=== Test 5: Flowing effect ===")
+        led_strip.start_flowing(0, 128, 255)
+        time.sleep(4)
+        led_strip.stop_animation()
+
+        print("=== Test 6: Cyclic color marquee ===")
         while True:
             for seq in color_sequences:
                 led_strip.set_multi_colors(seq)

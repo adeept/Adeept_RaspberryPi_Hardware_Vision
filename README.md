@@ -32,6 +32,7 @@ python3 -m Hardware.Motor
 python3 -m Hardware.Servo
 python3 -m Hardware.BatteryMonitor
 python3 -m Hardware.LightTracking
+python3 -m Hardware.SystemInfo
 ```
 
 
@@ -40,6 +41,35 @@ touch the class:
 
 ```python
 from Hardware import Servo, DCMotor, PCA9685
+```
+
+### Reading system information
+
+`SystemInfo` reports CPU / GPU temperature, CPU, RAM, swap and disk usage, uptime,
+load average and the under-voltage state. Demos run the same way as the other
+components:
+
+```bash
+cd ~
+python3 -m Hardware.SystemInfo            
+```
+
+Use it from your own code through the package:
+
+```python
+from Hardware import SystemInfo, SystemState
+
+info = SystemInfo()
+state = info.read()          # -> SystemState(cpu_temp, gpu_temp, cpu_usage, ram_usage,
+                             #                  swap_usage, disk_usage, uptime, load_average)
+
+isinstance(state, SystemState)   # True
+state.cpu_usage                  # 12.4
+state._asdict()                  # the snapshot as a dict
+
+info.as_dict()               # plain dict, ready for JSON responses
+info.cpu_temperature()       # 48.3 (C); metrics the board cannot provide are None
+info.throttled()             # {'under_voltage': False, ..., 'raw': 0}
 ```
 
 ## Using the Motion module

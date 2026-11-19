@@ -40,6 +40,9 @@ __all__ = [
     # Sensors and filters
     "MPU6050",
     "Kalman_filter",
+    # System information
+    "SystemInfo",
+    "SystemState",
 ]
 
 # Public name -> owning submodule (relative to this package).
@@ -61,6 +64,8 @@ _SUBMODULES = {
     "WS2812": ".WS2812",
     "MPU6050": ".MPU6050",
     "Kalman_filter": ".Kalman_Filter",
+    "SystemInfo": ".SystemInfo",
+    "SystemState": ".SystemInfo",
 }
 
 
