@@ -42,6 +42,7 @@ class OLED:
         self._closed = False
 
         self.font = self._load_font(font_path, font_size)
+        self._font_path = font_path
 
     def _load_font(self, font_path, font_size):
         """Try the requested font first, then the fallbacks, then Pillow's builtin."""
@@ -179,6 +180,14 @@ class OLED:
         """
         image, draw = self.new_canvas()
         self.draw_centered_text(draw, text, y_start)
+        self.display(image)
+
+    def show_lines(self, lines, font_size=10, line_height=10, x=2, y_start=0):
+        """Render fixed lines without wrapping, for compact status pages."""
+        font = self._load_font(self._font_path, font_size)
+        image, draw = self.new_canvas()
+        for index, text in enumerate(lines):
+            draw.text((x, y_start + index * line_height), text, font=font, fill=255)
         self.display(image)
 
     def close(self):

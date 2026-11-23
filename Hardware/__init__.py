@@ -22,6 +22,7 @@ __all__ = [
     "PCA9685",
     "Servo",
     "DCMotor",
+    "MotorBank",
     # ADC / power
     "ADS7830",
     "LightTracking",
@@ -50,6 +51,7 @@ _SUBMODULES = {
     "PCA9685": ".pca9685",
     "Servo": ".Servo",
     "DCMotor": ".Motor",
+    "MotorBank": ".Motor",
     "ADS7830": ".ads7830",
     "LightTracking": ".LightTracking",
     "BatteryMonitor": ".BatteryMonitor",

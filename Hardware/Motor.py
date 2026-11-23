@@ -10,6 +10,37 @@ DC motor driver based on PCA9685 H-bridge control.
 from .pca9685 import PCA9685
 
 
+class MotorBank:
+    """Four-wheel driver: pins and polarity stay here, callers pass speed, direction and motor number."""
+    DEFAULT_PINS = {1: (15, 14), 2: (12, 13), 3: (11, 10), 4: (8, 9)}
+    DEFAULT_DIRECTION = {1: -1, 2: -1, 3: -1, 4: -1}
+
+    def __init__(self, pca, motors=None, pins=None, directions=None):
+        available = pins or self.DEFAULT_PINS
+        numbers = tuple(available) if motors is None else tuple(motors)
+        missing = [number for number in numbers if number not in available]
+        if missing:
+            raise ValueError("unknown motor number(s): %s" % (missing,))
+        self._motors = {number: DCMotor(pca, *available[number]) for number in numbers}
+        directions = directions or {}
+        self._directions = {number: int(directions.get(number, self.DEFAULT_DIRECTION.get(number, 1)))
+                            for number in numbers}
+
+    def drive(self, speed, direction, motor_no=None):
+        """speed 0..100, direction >0 forward / <0 backward / 0 stop; motor_no None means all."""
+        speed = max(0.0, min(100.0, float(speed)))
+        sign = 1 if direction > 0 else -1 if direction < 0 else 0
+        if motor_no is not None and motor_no not in self._motors:
+            raise ValueError("motor number must be one of %s" % (tuple(self._motors),))
+        targets = self._motors if motor_no is None else (motor_no,)
+        for number in targets:
+            self._motors[number].throttle = self._directions[number] * sign * speed / 100.0
+
+    def close(self):
+        for motor in self._motors.values():
+            motor.close()
+
+
 class DCMotor:
     """DC motor driver compatible with adafruit_motor DCMotor."""
 
@@ -126,63 +157,27 @@ class DCMotor:
 if __name__ == "__main__":
     import time
 
-    MOTOR_PINS = [
-        (15, 14),   # M1
-        (12, 13),   # M2
-        (11, 10),   # M3
-        (8, 9)      # M4
-    ]
-
     pca = PCA9685(bus_num=1, address=0x5f, freq=50)
-
-    motors = [
-        DCMotor(pca, pos, neg)
-        for pos, neg in MOTOR_PINS
-    ]
-
-    for motor in motors:
-        motor.decay_mode = DCMotor.SLOW_DECAY
-
-    test_speed = 0.5
-    test_cycles = 3
+    motors = MotorBank(pca)
+    test_speed, test_cycles = 50, 3
 
     try:
         print("DC motor test start.")
-
         for i in range(test_cycles):
             print(f"Cycle {i + 1}/{test_cycles}: Forward")
-
-            for motor in motors:
-                motor.throttle = test_speed
-
+            motors.drive(test_speed, 1)
             time.sleep(2)
-
-            # Coast briefly before reversing direction.
-            for motor in motors:
-                motor.coast()
-
+            motors.drive(0, 0)
             time.sleep(0.1)
-
             print(f"Cycle {i + 1}/{test_cycles}: Backward")
-
-            for motor in motors:
-                motor.throttle = -test_speed
-
+            motors.drive(test_speed, -1)
             time.sleep(2)
-
-            for motor in motors:
-                motor.coast()
-
+            motors.drive(0, 0)
             time.sleep(0.1)
-
         print("Test completed.")
-
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
-
     finally:
-        for motor in motors:
-            motor.close()
-
+        motors.close()
         pca.deinit()
         print("Resources released.")

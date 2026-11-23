@@ -24,7 +24,6 @@ class OnBoardLED:
         self._leds = {}
         self._warned_ports = set()
         self._pin_config = pin_config if pin_config is not None else self._LED_PIN_CONFIG
-        # 只在构造时读一次 gpioinfo，避免每个引脚都开一次子进程
         self._gpio_table = self._read_gpioinfo()
         self._setup()
 
